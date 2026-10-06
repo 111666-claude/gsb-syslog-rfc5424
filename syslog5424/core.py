@@ -1,11 +1,20 @@
 """syslog 行解析与窗口去重。"""
 
+from collections import deque
+
 
 class Counter:
     """记录比较次数。"""
 
     def __init__(self):
         self.scanned = 0
+
+
+_ESCAPES = {'"': '"', "\\": "\\", "]": "]"}
+
+
+def _nilvalue(token):
+    return "" if token == "-" else token
 
 
 def _parse_sd(text, counter):
@@ -32,8 +41,13 @@ def _parse_sd(text, counter):
                 i += 1
                 buf = []
                 while i < len(text) and text[i] != '"':
-                    buf.append(text[i])
-                    i += 1
+                    ch = text[i]
+                    if ch == "\\" and i + 1 < len(text) and text[i + 1] in _ESCAPES:
+                        buf.append(_ESCAPES[text[i + 1]])
+                        i += 2
+                    else:
+                        buf.append(ch)
+                        i += 1
                 i += 1
                 params[pname] = "".join(buf)
             else:
@@ -66,7 +80,7 @@ def parse_line(line, counter):
     version, _ts, host, app, _procid, msgid, rest = tokens
     if rest.startswith("["):
         sd, msg = _parse_sd(rest, counter)
-    elif rest.startswith("-"):
+    elif rest == "-" or rest.startswith("- "):
         sd = {}
         msg = rest[1:].lstrip(" ")
     else:
@@ -74,12 +88,12 @@ def parse_line(line, counter):
         msg = rest
     return {
         "pri": pri,
-        "facility": pri,
-        "severity": 0,
+        "facility": pri // 8,
+        "severity": pri % 8,
         "version": version,
-        "hostname": host,
-        "app": app,
-        "msgid": msgid,
+        "hostname": _nilvalue(host),
+        "app": _nilvalue(app),
+        "msgid": _nilvalue(msgid),
         "sd": sd,
         "msg": msg,
     }
@@ -88,16 +102,22 @@ def parse_line(line, counter):
 class Store:
     def __init__(self, window):
         self.window = window
-        self.list = []
+        self.seen = {}
+        self.order = deque()
 
     def feed(self, line, now, counter):
         parsed = parse_line(line, counter)
         if parsed is None:
             return None
-        ident = (parsed["pri"], parsed["hostname"], parsed["app"], parsed["msgid"], parsed["msg"])
-        for entry in self.list:
+        ident = (parsed["hostname"], parsed["app"], parsed["msgid"], parsed["msg"])
+        while self.order and now - self.order[0][1] >= self.window:
+            old_ident, _ = self.order.popleft()
             counter.scanned += 1
-            if entry[0] == ident:
-                _ = entry
-        self.list.append((ident, now))
+            if self.seen.get(old_ident) is not None:
+                del self.seen[old_ident]
+        counter.scanned += 1
+        if ident in self.seen:
+            return None
+        self.seen[ident] = now
+        self.order.append((ident, now))
         return parsed
