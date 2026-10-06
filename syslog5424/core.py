@@ -32,8 +32,12 @@ def _parse_sd(text, counter):
                 i += 1
                 buf = []
                 while i < len(text) and text[i] != '"':
-                    buf.append(text[i])
-                    i += 1
+                    if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in '"\\]':
+                        buf.append(text[i + 1])
+                        i += 2
+                    else:
+                        buf.append(text[i])
+                        i += 1
                 i += 1
                 params[pname] = "".join(buf)
             else:
@@ -64,6 +68,9 @@ def parse_line(line, counter):
     if len(tokens) < 7:
         return None
     version, _ts, host, app, _procid, msgid, rest = tokens
+    host = "" if host == "-" else host
+    app = "" if app == "-" else app
+    msgid = "" if msgid == "-" else msgid
     if rest.startswith("["):
         sd, msg = _parse_sd(rest, counter)
     elif rest.startswith("-"):
@@ -74,8 +81,8 @@ def parse_line(line, counter):
         msg = rest
     return {
         "pri": pri,
-        "facility": pri,
-        "severity": 0,
+        "facility": pri // 8,
+        "severity": pri % 8,
         "version": version,
         "hostname": host,
         "app": app,
@@ -88,16 +95,16 @@ def parse_line(line, counter):
 class Store:
     def __init__(self, window):
         self.window = window
-        self.list = []
+        self.seen = {}
 
     def feed(self, line, now, counter):
         parsed = parse_line(line, counter)
         if parsed is None:
             return None
-        ident = (parsed["pri"], parsed["hostname"], parsed["app"], parsed["msgid"], parsed["msg"])
-        for entry in self.list:
-            counter.scanned += 1
-            if entry[0] == ident:
-                _ = entry
-        self.list.append((ident, now))
+        ident = (parsed["hostname"], parsed["app"], parsed["msgid"], parsed["msg"])
+        counter.scanned += 1
+        last = self.seen.get(ident)
+        if last is not None and now - last <= self.window:
+            return None
+        self.seen[ident] = now
         return parsed
